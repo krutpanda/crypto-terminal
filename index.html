@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PANDA Charting</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header id="toolbar">
+    <span class="brand">PANDA Charting</span>
+
+    <div class="seg" id="marketToggle">
+      <button data-market="spot" class="active">Spot</button>
+      <button data-market="futures">Futures</button>
+    </div>
+
+    <input id="symbolInput" value="BTCUSDT" spellcheck="false" title="Symbol (press Enter)" />
+
+    <select id="tfSelect" title="Timeframe">
+      <option value="1m">1m</option>
+      <option value="5m" selected>5m</option>
+      <option value="15m">15m</option>
+      <option value="1h">1h</option>
+      <option value="4h">4h</option>
+      <option value="1d">1d</option>
+    </select>
+
+    <label class="thr">Bubble &ge; $
+      <input id="thresholdInput" type="number" value="100000" step="10000" min="0" />
+    </label>
+
+    <button id="autoBtn" class="active" title="Auto-center live price (like TradingView)">A</button>
+
+    <span id="deltaInfo" class="delta"></span>
+    <span id="status" class="status">connecting&hellip;</span>
+  </header>
+
+  <main>
+    <div id="chartWrap">
+      <div id="chart"></div>
+      <canvas id="bubbleCanvas"></canvas>
+    </div>
+    <div id="depthWrap">
+      <div class="depthTitle">Depth</div>
+      <canvas id="depthCanvas"></canvas>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
