@@ -23,19 +23,26 @@ select, .thr input {
 .thr { font-size: 12px; color: #aab3c5; display: inline-flex; align-items: center; gap: 4px; }
 .thr input { width: 110px; }
 
-#autoBtn, #depthToggle, #depthHide {
+#autoBtn, #depthToggle, #depthHide, #settingsBtn, #settingsCancel, #settingsOk {
   height: 32px; border-radius: 6px; border: 1px solid #2a3247;
   background: #0b0e14; color: #aab3c5; font-weight: 700; cursor: pointer;
 }
 #autoBtn { width: 34px; }
-#depthToggle { padding: 0 12px; }
-#autoBtn.active, #depthToggle.active { background: #2057a7; border-color: #2f6fd0; color: #fff; }
+#depthToggle, #settingsBtn { padding: 0 12px; }
+#autoBtn.active, #depthToggle.active, #settingsOk { background: #2057a7; border-color: #2f6fd0; color: #fff; }
 #depthHide { height: 26px; padding: 0 10px; font-size: 12px; }
 
 .status { margin-left: auto; font-size: 12px; color: #8b94a7; }
 .status.ok { color: #2ecc71; }
 .status.err { color: #e74c3c; }
 .delta { font-size: 12px; font-variant-numeric: tabular-nums; }
+.settingsModal { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(0,0,0,0.55); }
+.settingsModal.hidden { display: none; }
+.settingsBox { width: min(360px, calc(100vw - 32px)); background: #11151f; border: 1px solid #2a3247; border-radius: 10px; box-shadow: 0 20px 50px rgba(0,0,0,0.55); }
+.settingsHead { padding: 12px 14px; border-bottom: 1px solid #1d2433; font-weight: 700; color: #e8edf5; }
+.settingsField { display: grid; gap: 8px; padding: 14px; font-size: 13px; color: #aab3c5; }
+.settingsField input { background: #0b0e14; color: #e8edf5; border: 1px solid #2a3247; border-radius: 6px; padding: 8px; }
+.settingsActions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 14px 14px; }
 
 main { display: flex; height: calc(100% - 49px); min-height: 0; }
 #chartWrap { position: relative; flex: 1; min-width: 0; }

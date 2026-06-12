@@ -32,12 +32,26 @@
 
     <button id="autoBtn" class="active" title="Auto-center live price (like TradingView)">A</button>
     <button id="depthToggle" class="active" title="Hide or show market depth">Depth</button>
+    <button id="settingsBtn" title="DOM and bubble settings">Settings</button>
 
     <span id="deltaInfo" class="delta"></span>
     <span id="bubbleInfo" class="delta"></span>
     <span id="depthInfo" class="delta"></span>
     <span id="status" class="status">connecting&hellip;</span>
   </header>
+
+  <div id="settingsModal" class="settingsModal hidden">
+    <div class="settingsBox">
+      <div class="settingsHead">Settings</div>
+      <label class="settingsField">DOM / Bubble trade volume ≥ $
+        <input id="domThresholdInput" type="number" value="50000" step="1000" min="0" />
+      </label>
+      <div class="settingsActions">
+        <button id="settingsCancel">Cancel</button>
+        <button id="settingsOk">OK</button>
+      </div>
+    </div>
+  </div>
 
   <main>
     <div id="chartWrap">

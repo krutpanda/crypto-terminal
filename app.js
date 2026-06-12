@@ -10,19 +10,20 @@ const ENDPOINTS = {
 };
 
 const TF_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
-const BIG_TRADE_USD = 50000;
+const DEFAULT_BIG_TRADE_USD = 50000;
 
 // ---------- state ----------
 const state = {
   symbol: 'BTCUSDT',
   tf: '5m',
   thresholdUsd: 100000,
+  domThresholdUsd: DEFAULT_BIG_TRADE_USD,
   autoCenter: true,
   depthVisible: true,
   ws: null,
   depthWs: null,
   wsGen: 0,            // generation counter to ignore stale sockets
-  bubbles: [],         // individual trades >= BIG_TRADE_USD: { tms, price, usd, side }
+  bubbles: [],         // individual trades >= domThresholdUsd: { tms, price, usd, side }
   domTrades: [],
   liveDeltas: new Map(),
   candlesByTime: new Map(),
@@ -43,6 +44,8 @@ const bubbleInfoEl = $('bubbleInfo');
 const depthInfoEl = $('depthInfo');
 const ohlcInfoEl = $('ohlcInfo');
 const domRowsEl = $('domRows');
+const settingsModalEl = $('settingsModal');
+const domThresholdInputEl = $('domThresholdInput');
 const bubbleCanvas = $('bubbleCanvas');
 const depthCanvas = $('depthCanvas');
 
@@ -195,6 +198,7 @@ function connectDepthWs(gen, s) {
 }
 
 function updateLiveCandle(price, ms) {
+  if (!Number.isFinite(price) || price <= 0) return;
   const bt = bucketTime(ms);
   const c = state.lastCandle;
   if (!c || bt > c.time) {
@@ -214,8 +218,13 @@ function updateLiveCandle(price, ms) {
 
 function onKline(k) {
   const time = Math.floor(k.t / 1000);
-  const close = state.orderBook.mid || +k.c;
-  const candle = { time, open: +k.o, high: +k.h, low: +k.l, close };
+  const open = +k.o;
+  const high = +k.h;
+  const low = +k.l;
+  const kClose = +k.c;
+  if (![open, high, low, kClose].every((v) => Number.isFinite(v) && v > 0)) return;
+  const close = state.orderBook.mid || kClose;
+  const candle = { time, open, high, low, close };
   // authoritative candle from Binance; merge with tick/depth-built close and extremes
   const c = state.lastCandle;
   if (c && c.time === time) {
@@ -252,13 +261,13 @@ function renderDomTrades() {
   domRowsEl.innerHTML = state.domTrades.map((t) => {
     const time = new Date(t.tms).toLocaleTimeString([], { hour12: false });
     return `<div class="domRow ${t.side}"><span>${time}</span><span>${t.side.toUpperCase()} ${fmtPrice(t.price)}</span><span class="domUsd">$${fmtUsd(t.usd)}</span></div>`;
-  }).join('') || '<div class="domRow"><span></span><span>Waiting for individual $50K+ trades</span><span></span></div>';
+  }).join('') || `<div class="domRow"><span></span><span>Waiting for individual $${fmtUsd(state.domThresholdUsd)}+ trades</span><span></span></div>`;
 }
 
 function recordTrade(t) {
   const price = parseFloat(t.p);
   const qty = parseFloat(t.q);
-  if (!Number.isFinite(price) || !Number.isFinite(qty)) return;
+  if (!Number.isFinite(price) || !Number.isFinite(qty) || price <= 0 || qty <= 0) return;
 
   const tms = t.T || Date.now();
   const side = t.m ? 'sell' : 'buy';
@@ -274,7 +283,7 @@ function recordTrade(t) {
   deltaInfoEl.textContent = `Δ ${liveDelta >= 0 ? '+' : ''}${liveDelta.toFixed(2)}`;
   deltaInfoEl.style.color = liveDelta >= 0 ? '#2ecc71' : '#e74c3c';
 
-  if (usd < BIG_TRADE_USD) return;
+  if (usd < state.domThresholdUsd) return;
   const trade = { tms, price, usd, side };
   state.bubbles.push(trade);
   state.domTrades.unshift(trade);
@@ -318,7 +327,7 @@ function onDepth(d) {
 function getBubbleGroups() {
   const groups = new Map();
   for (const b of state.bubbles) {
-    if (b.usd < BIG_TRADE_USD) continue;
+    if (b.usd < state.domThresholdUsd) continue;
     const time = bucketTime(b.tms);
     const key = `${time}.${b.side}`;
     const g = groups.get(key) || { time, side: b.side, usd: 0, maxUsd: 0, priceUsd: 0, count: 0 };
@@ -340,7 +349,7 @@ function updateBubbleMarkers() {
     shape: 'circle',
     text: `${g.side === 'buy' ? 'B' : 'S'} $${fmtUsd(g.usd)}`
   })));
-  bubbleInfoEl.textContent = `Bubbles ${groups.length} / DOM $50K+`;
+  bubbleInfoEl.textContent = `Bubbles ${groups.length} / DOM $${fmtUsd(state.domThresholdUsd)}+`;
   state.markersDirty = false;
 }
 
@@ -365,7 +374,7 @@ function drawBubbles() {
   const ts = chart.timeScale();
   const visible = ts.getVisibleRange();
   const groups = getBubbleGroups();
-  bubbleInfoEl.textContent = `Bubbles ${groups.length} / DOM $50K+`;
+  bubbleInfoEl.textContent = `Bubbles ${groups.length} / DOM $${fmtUsd(state.domThresholdUsd)}+`;
 
   for (const g of groups) {
     if (visible && (g.time < visible.from || g.time > visible.to)) continue;
@@ -376,7 +385,7 @@ function drawBubbles() {
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
 
     // DeepChart-style soft volume bubble: aggregate all threshold trades per candle/side.
-    const strength = Math.max(g.usd, g.maxUsd) / BIG_TRADE_USD;
+    const strength = Math.max(g.usd, g.maxUsd) / Math.max(state.domThresholdUsd, 1);
     const r = Math.min(90, 14 + Math.sqrt(strength) * 18);
     const color = g.side === 'buy' ? '46,204,113' : '231,76,60';
 
@@ -490,6 +499,20 @@ function setDepthVisible(on) {
 
 $('depthToggle').addEventListener('click', () => setDepthVisible(!state.depthVisible));
 $('depthHide').addEventListener('click', () => setDepthVisible(false));
+$('settingsBtn').addEventListener('click', () => {
+  domThresholdInputEl.value = String(state.domThresholdUsd);
+  settingsModalEl.classList.remove('hidden');
+});
+$('settingsCancel').addEventListener('click', () => settingsModalEl.classList.add('hidden'));
+$('settingsOk').addEventListener('click', () => {
+  state.domThresholdUsd = Math.max(0, parseFloat(domThresholdInputEl.value) || 0);
+  state.domTrades = state.bubbles.filter((b) => b.usd >= state.domThresholdUsd).slice(-80).reverse();
+  state.markersDirty = true;
+  updateBubbleMarkers();
+  renderDomTrades();
+  drawBubbles();
+  settingsModalEl.classList.add('hidden');
+});
 
 chart.subscribeCrosshairMove((param) => {
   const key = timeKey(param.time);
@@ -617,7 +640,7 @@ async function reload() {
   state.liveDeltas.clear();
   state.depthDirty = true;
   loadBubbles(); // restore persisted bubbles for this symbol
-  state.domTrades = state.bubbles.slice(-80).reverse();
+  state.domTrades = state.bubbles.filter((b) => b.usd >= state.domThresholdUsd).slice(-80).reverse();
   renderDomTrades();
   state.markersDirty = true;
   updateBubbleMarkers();
