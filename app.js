@@ -10,6 +10,7 @@ const ENDPOINTS = {
 };
 
 const TF_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
+const BIG_TRADE_USD = 50000;
 
 // ---------- state ----------
 const state = {
@@ -21,7 +22,9 @@ const state = {
   ws: null,
   depthWs: null,
   wsGen: 0,            // generation counter to ignore stale sockets
-  bubbles: [],         // { tms (trade time, ms), price, usd, side }
+  bubbles: [],         // individual trades >= BIG_TRADE_USD: { tms, price, usd, side }
+  domTrades: [],
+  liveDeltas: new Map(),
   candlesByTime: new Map(),
   deltasByTime: new Map(),
   lastCandle: null,
@@ -39,6 +42,7 @@ const deltaInfoEl = $('deltaInfo');
 const bubbleInfoEl = $('bubbleInfo');
 const depthInfoEl = $('depthInfo');
 const ohlcInfoEl = $('ohlcInfo');
+const domRowsEl = $('domRows');
 const bubbleCanvas = $('bubbleCanvas');
 const depthCanvas = $('depthCanvas');
 
@@ -146,7 +150,7 @@ function connectWs() {
   const s = state.symbol.toLowerCase();
 
   // Keep price/trade data on its own socket so a depth issue can never freeze candles.
-  const marketStreams = [`${s}@kline_${state.tf}`, `${s}@aggTrade`, `${s}@bookTicker`].join('/');
+  const marketStreams = [`${s}@kline_${state.tf}`, `${s}@trade`, `${s}@bookTicker`].join('/');
   const ws = new WebSocket(ENDPOINTS.ws + marketStreams);
   state.ws = ws;
 
@@ -158,7 +162,7 @@ function connectWs() {
     const data = msg.data || msg;
     const stream = msg.stream || '';
     if (stream.includes('@kline') || data.e === 'kline') onKline(data.k);
-    else if (stream.includes('@aggTrade') || data.e === 'aggTrade') onAggTrade(data);
+    else if (stream.includes('@trade') || data.e === 'trade') onTrade(data);
     else if (stream.includes('@bookTicker') || data.e === 'bookTicker') onBookTicker(data);
   };
 
@@ -224,7 +228,9 @@ function onKline(k) {
 
   const vol = parseFloat(k.v);
   const takerBuy = parseFloat(k.V);
-  const delta = 2 * takerBuy - vol;
+  const exchangeDelta = 2 * takerBuy - vol;
+  const liveDelta = state.liveDeltas.get(time);
+  const delta = Number.isFinite(liveDelta) ? liveDelta : exchangeDelta;
   state.deltasByTime.set(time, delta);
   deltaSeries.update({ time, value: delta, color: deltaColor(delta) });
   deltaInfoEl.textContent = `\u0394 ${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`;
@@ -241,26 +247,47 @@ function onBookTicker(t) {
   updateLiveCandle(mid, Date.now());
 }
 
-function onAggTrade(t) {
+function renderDomTrades() {
+  if (!domRowsEl) return;
+  domRowsEl.innerHTML = state.domTrades.map((t) => {
+    const time = new Date(t.tms).toLocaleTimeString([], { hour12: false });
+    return `<div class="domRow ${t.side}"><span>${time}</span><span>${t.side.toUpperCase()} ${fmtPrice(t.price)}</span><span class="domUsd">$${fmtUsd(t.usd)}</span></div>`;
+  }).join('') || '<div class="domRow"><span></span><span>Waiting for individual $50K+ trades</span><span></span></div>';
+}
+
+function recordTrade(t) {
   const price = parseFloat(t.p);
   const qty = parseFloat(t.q);
+  if (!Number.isFinite(price) || !Number.isFinite(qty)) return;
+
+  const tms = t.T || Date.now();
+  const side = t.m ? 'sell' : 'buy';
   const usd = price * qty;
+  updateLiveCandle(price, tms);
 
-  // Build/extend the live candle from every tick so candles move in real time.
-  updateLiveCandle(price, t.T);
+  const time = bucketTime(tms);
+  const signedQty = side === 'buy' ? qty : -qty;
+  const liveDelta = (state.liveDeltas.get(time) || 0) + signedQty;
+  state.liveDeltas.set(time, liveDelta);
+  state.deltasByTime.set(time, liveDelta);
+  deltaSeries.update({ time, value: liveDelta, color: deltaColor(liveDelta) });
+  deltaInfoEl.textContent = `Δ ${liveDelta >= 0 ? '+' : ''}${liveDelta.toFixed(2)}`;
+  deltaInfoEl.style.color = liveDelta >= 0 ? '#2ecc71' : '#e74c3c';
 
-  // record big trades as bubbles
-  if (usd < state.thresholdUsd) return;
-  state.bubbles.push({
-    tms: t.T, // raw trade time (ms) so bubbles survive timeframe changes
-    price,
-    usd,
-    side: t.m ? 'sell' : 'buy' // m=true: buyer is maker => aggressive sell
-  });
+  if (usd < BIG_TRADE_USD) return;
+  const trade = { tms, price, usd, side };
+  state.bubbles.push(trade);
+  state.domTrades.unshift(trade);
   if (state.bubbles.length > 1800) state.bubbles.splice(0, state.bubbles.length - 1800);
+  if (state.domTrades.length > 80) state.domTrades.splice(80);
   state.markersDirty = true;
   updateBubbleMarkers();
+  renderDomTrades();
   saveBubbles();
+}
+
+function onTrade(t) {
+  recordTrade(t);
 }
 
 function onDepth(d) {
@@ -291,7 +318,7 @@ function onDepth(d) {
 function getBubbleGroups() {
   const groups = new Map();
   for (const b of state.bubbles) {
-    if (b.usd < state.thresholdUsd) continue;
+    if (b.usd < BIG_TRADE_USD) continue;
     const time = bucketTime(b.tms);
     const key = `${time}.${b.side}`;
     const g = groups.get(key) || { time, side: b.side, usd: 0, maxUsd: 0, priceUsd: 0, count: 0 };
@@ -313,7 +340,7 @@ function updateBubbleMarkers() {
     shape: 'circle',
     text: `${g.side === 'buy' ? 'B' : 'S'} $${fmtUsd(g.usd)}`
   })));
-  bubbleInfoEl.textContent = `Bubbles ${groups.length}`;
+  bubbleInfoEl.textContent = `Bubbles ${groups.length} / DOM $50K+`;
   state.markersDirty = false;
 }
 
@@ -338,7 +365,7 @@ function drawBubbles() {
   const ts = chart.timeScale();
   const visible = ts.getVisibleRange();
   const groups = getBubbleGroups();
-  bubbleInfoEl.textContent = `Bubbles ${groups.length}`;
+  bubbleInfoEl.textContent = `Bubbles ${groups.length} / DOM $50K+`;
 
   for (const g of groups) {
     if (visible && (g.time < visible.from || g.time > visible.to)) continue;
@@ -349,7 +376,7 @@ function drawBubbles() {
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
 
     // DeepChart-style soft volume bubble: aggregate all threshold trades per candle/side.
-    const strength = Math.max(g.usd, g.maxUsd) / Math.max(state.thresholdUsd, 1);
+    const strength = Math.max(g.usd, g.maxUsd) / BIG_TRADE_USD;
     const r = Math.min(90, 14 + Math.sqrt(strength) * 18);
     const color = g.side === 'buy' ? '46,204,113' : '231,76,60';
 
@@ -587,8 +614,11 @@ $('thresholdInput').addEventListener('input', (e) => {
 async function reload() {
   setStatus('loading\u2026');
   state.orderBook = { bids: [], asks: [], mid: null };
+  state.liveDeltas.clear();
   state.depthDirty = true;
   loadBubbles(); // restore persisted bubbles for this symbol
+  state.domTrades = state.bubbles.slice(-80).reverse();
+  renderDomTrades();
   state.markersDirty = true;
   updateBubbleMarkers();
   drawBubbles();
