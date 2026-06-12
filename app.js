@@ -3,16 +3,20 @@
 
 'use strict';
 
+// Futures-only: Binance USD-M futures endpoints
 const ENDPOINTS = {
-  spot:    { rest: 'https://api.binance.com/api/v3/klines',  ws: 'wss://stream.binance.com:9443/stream?streams=' },
-  futures: { rest: 'https://fapi.binance.com/fapi/v1/klines', ws: 'wss://fstream.binance.com/stream?streams=' }
+  futures: {
+    rest: 'https://fapi.binance.com/fapi/v1/klines',
+    ticker: 'https://fapi.binance.com/fapi/v1/ticker/24hr',
+    ws: 'wss://fstream.binance.com/stream?streams='
+  }
 };
 
 const TF_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
 
 // ---------- state ----------
 const state = {
-  market: 'spot',
+  market: 'futures',
   symbol: 'BTCUSDT',
   tf: '5m',
   thresholdUsd: 100000,
@@ -21,7 +25,10 @@ const state = {
   wsGen: 0,            // generation counter to ignore stale sockets
   bubbles: [],         // { time (candle bucket, sec), price, usd, side }
   depth: { bids: [], asks: [] },
-  lastCandle: null
+  lastCandle: null,
+  candleDirty: false,
+  depthDirty: false,
+  topSymbols: []
 };
 
 // ---------- DOM ----------
@@ -33,6 +40,7 @@ const depthCanvas = $('depthCanvas');
 
 // ---------- chart ----------
 const chart = LightweightCharts.createChart($('chart'), {
+  autoSize: true,
   layout: { background: { color: '#0b0e14' }, textColor: '#aab3c5' },
   grid: { vertLines: { color: '#151b28' }, horzLines: { color: '#151b28' } },
   rightPriceScale: { borderColor: '#1d2433', scaleMargins: { top: 0.08, bottom: 0.22 } },
@@ -73,6 +81,22 @@ function fmtUsd(v) {
   if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
   if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
   return v.toFixed(0);
+}
+
+// ---------- bubble persistence (survive page refresh) ----------
+function bubbleKey() { return `panda.bubbles.${state.market}.${state.symbol}`; }
+
+function saveBubbles() {
+  try { localStorage.setItem(bubbleKey(), JSON.stringify(state.bubbles.slice(-600))); } catch (_) {}
+}
+
+function loadBubbles() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(bubbleKey())) || [];
+    state.bubbles = saved.filter((b) => b && b.tms && b.usd >= state.thresholdUsd);
+  } catch (_) {
+    state.bubbles = [];
+  }
 }
 
 // ---------- historical klines ----------
@@ -131,8 +155,14 @@ function connectWs() {
 function onKline(k) {
   const time = Math.floor(k.t / 1000);
   const candle = { time, open: +k.o, high: +k.h, low: +k.l, close: +k.c };
-  candleSeries.update(candle);
+  // authoritative candle from Binance; the render loop paints it within ~16ms
+  const c = state.lastCandle;
+  if (c && c.time === time) {
+    candle.high = Math.max(candle.high, c.high);
+    candle.low = Math.min(candle.low, c.low);
+  }
   state.lastCandle = candle;
+  state.candleDirty = true;
 
   const vol = parseFloat(k.v);
   const takerBuy = parseFloat(k.V);
@@ -140,24 +170,39 @@ function onKline(k) {
   deltaSeries.update({ time, value: delta, color: deltaColor(delta) });
   deltaInfoEl.textContent = `\u0394 ${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`;
   deltaInfoEl.style.color = delta >= 0 ? '#2ecc71' : '#e74c3c';
-
-  if (state.autoCenter) autoCenterNow();
-  drawBubbles();
 }
 
 function onAggTrade(t) {
   const price = parseFloat(t.p);
   const qty = parseFloat(t.q);
   const usd = price * qty;
+
+  // Build/extend the live candle from every tick so candles move in real
+  // time even between (slow, ~2s) kline pushes.
+  const bt = bucketTime(t.T);
+  const c = state.lastCandle;
+  if (!c || bt > c.time) {
+    state.lastCandle = { time: bt, open: price, high: price, low: price, close: price };
+  } else if (bt === c.time) {
+    state.lastCandle = {
+      time: c.time,
+      open: c.open,
+      high: Math.max(c.high, price),
+      low: Math.min(c.low, price),
+      close: price
+    };
+  }
+  state.candleDirty = true;
+
   if (usd < state.thresholdUsd) return;
   state.bubbles.push({
-    time: bucketTime(t.T),
+    tms: t.T, // raw trade time (ms) so bubbles survive timeframe changes
     price,
     usd,
     side: t.m ? 'sell' : 'buy' // m=true: buyer is maker => aggressive sell
   });
   if (state.bubbles.length > 600) state.bubbles.splice(0, state.bubbles.length - 600);
-  drawBubbles();
+  saveBubbles();
 }
 
 function onDepth(d) {
@@ -165,7 +210,7 @@ function onDepth(d) {
   const asks = d.asks || d.a || [];
   state.depth.bids = bids.map((x) => [parseFloat(x[0]), parseFloat(x[1])]);
   state.depth.asks = asks.map((x) => [parseFloat(x[0]), parseFloat(x[1])]);
-  drawDepth();
+  state.depthDirty = true;
 }
 
 // ---------- bubble overlay ----------
@@ -188,15 +233,17 @@ function drawBubbles() {
 
   const ts = chart.timeScale();
   for (const b of state.bubbles) {
-    const x = ts.timeToCoordinate(b.time);
+    const x = ts.timeToCoordinate(bucketTime(b.tms));
     const y = candleSeries.priceToCoordinate(b.price);
     if (x === null || y === null) continue;
-    const r = Math.min(34, 4 + Math.sqrt(b.usd / Math.max(state.thresholdUsd, 1)) * 5);
+    // radius scales with trade size: bigger volume => bigger bubble
+    const r = Math.min(64, 6 + Math.sqrt(b.usd / Math.max(state.thresholdUsd, 1)) * 9);
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = b.side === 'buy' ? 'rgba(46,204,113,0.30)' : 'rgba(231,76,60,0.30)';
+    // green = buy order executed, red = sell executed
+    ctx.fillStyle = b.side === 'buy' ? 'rgba(46,204,113,0.45)' : 'rgba(231,76,60,0.45)';
     ctx.fill();
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 2;
     ctx.strokeStyle = b.side === 'buy' ? '#2ecc71' : '#e74c3c';
     ctx.stroke();
     if (r >= 12) {
@@ -208,7 +255,24 @@ function drawBubbles() {
   }
 }
 
-chart.timeScale().subscribeVisibleTimeRangeChange(drawBubbles);
+// ---------- render loops ----------
+// Candles + trade bubbles repaint every ~16ms (within the 10-20ms window).
+setInterval(() => {
+  if (state.candleDirty && state.lastCandle) {
+    candleSeries.update(state.lastCandle);
+    state.candleDirty = false;
+    if (state.autoCenter) autoCenterNow();
+  }
+  drawBubbles();
+}, 16);
+
+// Depth histogram repaints every 20ms.
+setInterval(() => {
+  if (state.depthDirty) {
+    drawDepth();
+    state.depthDirty = false;
+  }
+}, 20);
 
 // ---------- depth chart ----------
 function drawDepth() {
@@ -220,31 +284,27 @@ function drawDepth() {
   const { bids, asks } = state.depth;
   if (!bids.length || !asks.length) return;
 
-  // cumulative volumes
-  let cum = 0;
-  const cumBids = bids.map(([p, q]) => { cum += q; return [p, cum]; });
-  cum = 0;
-  const cumAsks = asks.map(([p, q]) => { cum += q; return [p, cum]; });
-  const maxCum = Math.max(cumBids[cumBids.length - 1][1], cumAsks[cumAsks.length - 1][1]);
+  // histogram: one horizontal bar per price level, width = level quantity
+  const minP = bids[bids.length - 1][0];
+  const maxP = asks[asks.length - 1][0];
+  let maxQty = 0;
+  for (const [, q] of bids) maxQty = Math.max(maxQty, q);
+  for (const [, q] of asks) maxQty = Math.max(maxQty, q);
 
-  const minP = cumBids[cumBids.length - 1][0];
-  const maxP = cumAsks[cumAsks.length - 1][0];
   const yOf = (p) => H - ((p - minP) / (maxP - minP || 1)) * H;
-  const xOf = (v) => (v / (maxCum || 1)) * (W - 6);
+  const xOf = (q) => (q / (maxQty || 1)) * (W - 6);
+  const barH = Math.max(2, Math.floor(H / (bids.length + asks.length)) - 1);
 
-  const fillSide = (levels, color, stroke) => {
-    ctx.beginPath();
-    ctx.moveTo(0, yOf(levels[0][0]));
-    for (const [p, v] of levels) ctx.lineTo(xOf(v), yOf(p));
-    ctx.lineTo(0, yOf(levels[levels.length - 1][0]));
-    ctx.closePath();
+  const drawBars = (levels, color) => {
     ctx.fillStyle = color;
-    ctx.fill();
-    ctx.strokeStyle = stroke;
-    ctx.stroke();
+    for (const [p, q] of levels) {
+      const w = xOf(q);
+      if (w <= 0) continue;
+      ctx.fillRect(0, yOf(p) - barH / 2, w, barH);
+    }
   };
-  fillSide(cumBids, 'rgba(46,204,113,0.22)', '#2ecc71');
-  fillSide(cumAsks, 'rgba(231,76,60,0.22)', '#e74c3c');
+  drawBars(bids, 'rgba(46,204,113,0.55)');
+  drawBars(asks, 'rgba(231,76,60,0.55)');
 
   // mid price line + label
   const mid = (bids[0][0] + asks[0][0]) / 2;
@@ -283,20 +343,56 @@ chartEl.addEventListener('wheel', () => setAutoCenter(false), { passive: true })
 chartEl.addEventListener('touchstart', () => setAutoCenter(false), { passive: true });
 
 // ---------- toolbar wiring ----------
-document.querySelectorAll('#marketToggle button').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('#marketToggle button').forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    state.market = btn.dataset.market;
-    reload();
-  });
-});
+// ---------- symbol search: top 50 USDT pairs by 24h volume ----------
+const symInput = $('symbolInput');
+const symList = $('symbolList');
 
-$('symbolInput').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    state.symbol = e.target.value.trim().toUpperCase();
-    reload();
-  }
+async function loadTopSymbols() {
+  try {
+    const res = await fetch(ENDPOINTS[state.market].ticker);
+    if (!res.ok) return;
+    const rows = await res.json();
+    state.topSymbols = rows
+      .filter((r) => r.symbol.endsWith('USDT'))
+      .map((r) => ({
+        symbol: r.symbol,
+        vol: parseFloat(r.quoteVolume),
+        chg: parseFloat(r.priceChangePercent)
+      }))
+      .sort((a, b) => b.vol - a.vol)
+      .slice(0, 50);
+  } catch (_) {}
+}
+
+function renderSymbolList(filter) {
+  const q = (filter || '').trim().toUpperCase();
+  const rows = state.topSymbols.filter((s) => !q || s.symbol.includes(q));
+  symList.innerHTML = rows.map((s) => `
+    <div class="symRow" data-sym="${s.symbol}">
+      <span class="symName">${s.symbol}</span>
+      <span class="symVol">$${fmtUsd(s.vol)}</span>
+      <span class="symChg ${s.chg >= 0 ? 'up' : 'down'}">${s.chg >= 0 ? '+' : ''}${s.chg.toFixed(2)}%</span>
+    </div>`).join('');
+  symList.style.display = rows.length ? 'block' : 'none';
+}
+
+function pickSymbol(sym) {
+  if (!sym) return;
+  symInput.value = sym;
+  state.symbol = sym;
+  symList.style.display = 'none';
+  reload();
+}
+
+symInput.addEventListener('focus', () => renderSymbolList(symInput.value));
+symInput.addEventListener('input', () => renderSymbolList(symInput.value));
+symInput.addEventListener('blur', () => setTimeout(() => { symList.style.display = 'none'; }, 150));
+symInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') pickSymbol(e.target.value.trim().toUpperCase());
+});
+symList.addEventListener('mousedown', (e) => {
+  const row = e.target.closest('.symRow');
+  if (row) pickSymbol(row.dataset.sym);
 });
 
 $('tfSelect').addEventListener('change', (e) => {
@@ -307,13 +403,14 @@ $('tfSelect').addEventListener('change', (e) => {
 $('thresholdInput').addEventListener('change', (e) => {
   state.thresholdUsd = Math.max(0, parseFloat(e.target.value) || 0);
   state.bubbles = state.bubbles.filter((b) => b.usd >= state.thresholdUsd);
+  saveBubbles();
   drawBubbles();
 });
 
 // ---------- lifecycle ----------
 async function reload() {
   setStatus('loading\u2026');
-  state.bubbles = [];
+  loadBubbles(); // restore persisted bubbles for this market + symbol
   state.depth = { bids: [], asks: [] };
   drawBubbles();
   drawDepth();
@@ -332,4 +429,5 @@ window.addEventListener('resize', () => {
   drawDepth();
 });
 
+loadTopSymbols();
 reload();
