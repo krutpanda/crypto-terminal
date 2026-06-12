@@ -3,12 +3,8 @@
 
 'use strict';
 
+// Futures-only: Binance USD-M futures endpoints
 const ENDPOINTS = {
-  spot: {
-    rest: 'https://api.binance.com/api/v3/klines',
-    ticker: 'https://api.binance.com/api/v3/ticker/24hr',
-    ws: 'wss://stream.binance.com:9443/stream?streams='
-  },
   futures: {
     rest: 'https://fapi.binance.com/fapi/v1/klines',
     ticker: 'https://fapi.binance.com/fapi/v1/ticker/24hr',
@@ -20,7 +16,7 @@ const TF_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '
 
 // ---------- state ----------
 const state = {
-  market: 'spot',
+  market: 'futures',
   symbol: 'BTCUSDT',
   tf: '5m',
   thresholdUsd: 100000,
@@ -240,12 +236,14 @@ function drawBubbles() {
     const x = ts.timeToCoordinate(bucketTime(b.tms));
     const y = candleSeries.priceToCoordinate(b.price);
     if (x === null || y === null) continue;
-    const r = Math.min(34, 4 + Math.sqrt(b.usd / Math.max(state.thresholdUsd, 1)) * 5);
+    // radius scales with trade size: bigger volume => bigger bubble
+    const r = Math.min(64, 6 + Math.sqrt(b.usd / Math.max(state.thresholdUsd, 1)) * 9);
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fillStyle = b.side === 'buy' ? 'rgba(46,204,113,0.30)' : 'rgba(231,76,60,0.30)';
+    // green = buy order executed, red = sell executed
+    ctx.fillStyle = b.side === 'buy' ? 'rgba(46,204,113,0.45)' : 'rgba(231,76,60,0.45)';
     ctx.fill();
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 2;
     ctx.strokeStyle = b.side === 'buy' ? '#2ecc71' : '#e74c3c';
     ctx.stroke();
     if (r >= 12) {
@@ -345,16 +343,6 @@ chartEl.addEventListener('wheel', () => setAutoCenter(false), { passive: true })
 chartEl.addEventListener('touchstart', () => setAutoCenter(false), { passive: true });
 
 // ---------- toolbar wiring ----------
-document.querySelectorAll('#marketToggle button').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('#marketToggle button').forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    state.market = btn.dataset.market;
-    loadTopSymbols();
-    reload();
-  });
-});
-
 // ---------- symbol search: top 50 USDT pairs by 24h volume ----------
 const symInput = $('symbolInput');
 const symList = $('symbolList');

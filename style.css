@@ -8,11 +8,10 @@ html, body { margin: 0; height: 100%; background: #0b0e14; color: #d6dbe4; font-
 }
 .brand { font-weight: 700; color: #4da3ff; margin-right: 6px; }
 
-.seg { display: inline-flex; border: 1px solid #2a3247; border-radius: 6px; overflow: hidden; }
-.seg button {
-  background: transparent; color: #aab3c5; border: 0; padding: 6px 14px; cursor: pointer; font-size: 13px;
+.futBadge {
+  padding: 6px 14px; background: #2057a7; color: #fff; font-size: 13px;
+  font-weight: 600; border-radius: 6px;
 }
-.seg button.active { background: #2057a7; color: #fff; }
 
 #symbolInput {
   width: 110px; background: #0b0e14; color: #e8edf5; border: 1px solid #2a3247;
