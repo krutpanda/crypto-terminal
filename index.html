@@ -31,8 +31,10 @@
     </label>
 
     <button id="autoBtn" class="active" title="Auto-center live price (like TradingView)">A</button>
+    <button id="depthToggle" class="active" title="Hide or show market depth">Depth</button>
 
     <span id="deltaInfo" class="delta"></span>
+    <span id="depthInfo" class="delta"></span>
     <span id="status" class="status">connecting&hellip;</span>
   </header>
 
@@ -41,6 +43,13 @@
       <div id="chart"></div>
       <canvas id="bubbleCanvas"></canvas>
     </div>
+    <aside id="depthPanel">
+      <div class="depthHead">
+        <span>Market Depth</span>
+        <button id="depthHide" title="Hide depth chart">Hide</button>
+      </div>
+      <canvas id="depthCanvas"></canvas>
+    </aside>
   </main>
 
   <script src="app.js"></script>

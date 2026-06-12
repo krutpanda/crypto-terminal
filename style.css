@@ -23,21 +23,40 @@ select, .thr input {
 .thr { font-size: 12px; color: #aab3c5; display: inline-flex; align-items: center; gap: 4px; }
 .thr input { width: 110px; }
 
-#autoBtn {
-  width: 34px; height: 32px; border-radius: 6px; border: 1px solid #2a3247;
+#autoBtn, #depthToggle, #depthHide {
+  height: 32px; border-radius: 6px; border: 1px solid #2a3247;
   background: #0b0e14; color: #aab3c5; font-weight: 700; cursor: pointer;
 }
-#autoBtn.active { background: #2057a7; border-color: #2f6fd0; color: #fff; }
+#autoBtn { width: 34px; }
+#depthToggle { padding: 0 12px; }
+#autoBtn.active, #depthToggle.active { background: #2057a7; border-color: #2f6fd0; color: #fff; }
+#depthHide { height: 26px; padding: 0 10px; font-size: 12px; }
 
 .status { margin-left: auto; font-size: 12px; color: #8b94a7; }
 .status.ok { color: #2ecc71; }
 .status.err { color: #e74c3c; }
 .delta { font-size: 12px; font-variant-numeric: tabular-nums; }
 
-main { display: flex; height: calc(100% - 49px); }
+main { display: flex; height: calc(100% - 49px); min-height: 0; }
 #chartWrap { position: relative; flex: 1; min-width: 0; }
 #chart { position: absolute; inset: 0; }
 #bubbleCanvas { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+
+#depthPanel {
+  width: 320px; min-width: 260px; border-left: 1px solid #1d2433; background: #0d111a;
+  display: flex; flex-direction: column;
+}
+#depthPanel.hidden { display: none; }
+.depthHead {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 8px 10px; border-bottom: 1px solid #1d2433; color: #e8edf5; font-size: 13px; font-weight: 700;
+}
+#depthCanvas { flex: 1; width: 100%; min-height: 0; }
+
+@media (max-width: 800px) {
+  #depthPanel { width: 100%; height: 34%; min-width: 0; border-left: 0; border-top: 1px solid #1d2433; }
+  main { flex-direction: column; }
+}
 
 /* symbol search dropdown */
 .symBox { position: relative; }

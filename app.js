@@ -17,11 +17,14 @@ const state = {
   tf: '5m',
   thresholdUsd: 100000,
   autoCenter: true,
+  depthVisible: true,
   ws: null,
   wsGen: 0,            // generation counter to ignore stale sockets
   bubbles: [],         // { tms (trade time, ms), price, usd, side }
   lastCandle: null,
   candleDirty: false,
+  depthDirty: false,
+  orderBook: { bids: [], asks: [], mid: null },
   topSymbols: []
 };
 
@@ -29,7 +32,9 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const statusEl = $('status');
 const deltaInfoEl = $('deltaInfo');
+const depthInfoEl = $('depthInfo');
 const bubbleCanvas = $('bubbleCanvas');
+const depthCanvas = $('depthCanvas');
 
 // ---------- chart ----------
 const chart = LightweightCharts.createChart($('chart'), {
@@ -120,7 +125,7 @@ function connectWs() {
   if (state.ws) { try { state.ws.close(); } catch (_) {} }
   const gen = ++state.wsGen;
   const s = state.symbol.toLowerCase();
-  const streams = [`${s}@kline_${state.tf}`, `${s}@aggTrade`].join('/');
+  const streams = [`${s}@kline_${state.tf}`, `${s}@aggTrade`, `${s}@depth20@100ms`].join('/');
   const ws = new WebSocket(ENDPOINTS.ws + streams);
   state.ws = ws;
 
@@ -133,6 +138,7 @@ function connectWs() {
     const stream = msg.stream || '';
     if (stream.includes('@kline') || data.e === 'kline') onKline(data.k);
     else if (stream.includes('@aggTrade') || data.e === 'aggTrade') onAggTrade(data);
+    else if (stream.includes('@depth') || data.e === 'depthUpdate') onDepth(data);
   };
 
   ws.onclose = () => {
@@ -143,14 +149,32 @@ function connectWs() {
   ws.onerror = () => { try { ws.close(); } catch (_) {} };
 }
 
+function updateLiveCandle(price, ms) {
+  const bt = bucketTime(ms);
+  const c = state.lastCandle;
+  if (!c || bt > c.time) {
+    state.lastCandle = { time: bt, open: price, high: price, low: price, close: price };
+  } else if (bt === c.time) {
+    state.lastCandle = {
+      time: c.time,
+      open: c.open,
+      high: Math.max(c.high, price),
+      low: Math.min(c.low, price),
+      close: price
+    };
+  }
+  state.candleDirty = true;
+}
+
 function onKline(k) {
   const time = Math.floor(k.t / 1000);
-  const candle = { time, open: +k.o, high: +k.h, low: +k.l, close: +k.c };
-  // authoritative candle from Binance; merge with tick-built extremes
+  const close = state.orderBook.mid || +k.c;
+  const candle = { time, open: +k.o, high: +k.h, low: +k.l, close };
+  // authoritative candle from Binance; merge with tick/depth-built close and extremes
   const c = state.lastCandle;
   if (c && c.time === time) {
-    candle.high = Math.max(candle.high, c.high);
-    candle.low = Math.min(candle.low, c.low);
+    candle.high = Math.max(candle.high, c.high, close);
+    candle.low = Math.min(candle.low, c.low, close);
   }
   state.lastCandle = candle;
   state.candleDirty = true;
@@ -169,20 +193,7 @@ function onAggTrade(t) {
   const usd = price * qty;
 
   // Build/extend the live candle from every tick so candles move in real time.
-  const bt = bucketTime(t.T);
-  const c = state.lastCandle;
-  if (!c || bt > c.time) {
-    state.lastCandle = { time: bt, open: price, high: price, low: price, close: price };
-  } else if (bt === c.time) {
-    state.lastCandle = {
-      time: c.time,
-      open: c.open,
-      high: Math.max(c.high, price),
-      low: Math.min(c.low, price),
-      close: price
-    };
-  }
-  state.candleDirty = true;
+  updateLiveCandle(price, t.T);
 
   // record big trades as bubbles
   if (usd < state.thresholdUsd) return;
@@ -194,6 +205,28 @@ function onAggTrade(t) {
   });
   if (state.bubbles.length > 600) state.bubbles.splice(0, state.bubbles.length - 600);
   saveBubbles();
+}
+
+function onDepth(d) {
+  const bids = (d.b || d.bids || [])
+    .map((r) => ({ price: +r[0], qty: +r[1] }))
+    .filter((r) => r.price > 0 && r.qty > 0)
+    .sort((a, b) => b.price - a.price)
+    .slice(0, 20);
+  const asks = (d.a || d.asks || [])
+    .map((r) => ({ price: +r[0], qty: +r[1] }))
+    .filter((r) => r.price > 0 && r.qty > 0)
+    .sort((a, b) => a.price - b.price)
+    .slice(0, 20);
+  if (!bids.length || !asks.length) return;
+
+  const bestBid = bids[0].price;
+  const bestAsk = asks[0].price;
+  const mid = (bestBid + bestAsk) / 2;
+  state.orderBook = { bids, asks, mid };
+  state.depthDirty = true;
+  depthInfoEl.textContent = `Depth ${mid.toFixed(mid >= 100 ? 2 : 5)}`;
+  updateLiveCandle(mid, d.E || Date.now());
 }
 
 // ---------- bubble overlay ----------
@@ -213,13 +246,17 @@ function drawBubbles() {
   const ctx = sizeCanvas(bubbleCanvas);
   const rect = bubbleCanvas.getBoundingClientRect();
   ctx.clearRect(0, 0, rect.width, rect.height);
+  if (!rect.width || !rect.height) return;
 
   const ts = chart.timeScale();
+  const visible = ts.getVisibleRange();
   for (const b of state.bubbles) {
     if (b.usd < state.thresholdUsd) continue;
-    const x = ts.timeToCoordinate(bucketTime(b.tms));
+    const bubbleTime = bucketTime(b.tms);
+    if (visible && (bubbleTime < visible.from || bubbleTime > visible.to)) continue;
+    const x = ts.timeToCoordinate(bubbleTime);
     const y = candleSeries.priceToCoordinate(b.price);
-    if (x === null || y === null) continue;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     // radius scales with trade size: bigger volume => bigger bubble
     const r = Math.min(64, 6 + Math.sqrt(b.usd / Math.max(state.thresholdUsd, 1)) * 9);
     ctx.beginPath();
@@ -239,6 +276,92 @@ function drawBubbles() {
   }
 }
 
+// ---------- depth chart ----------
+function drawDepth() {
+  if (!state.depthVisible) return;
+  const ctx = sizeCanvas(depthCanvas);
+  const rect = depthCanvas.getBoundingClientRect();
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  if (!rect.width || !rect.height) return;
+
+  const { bids, asks, mid } = state.orderBook;
+  if (!bids.length || !asks.length) {
+    ctx.fillStyle = '#8b94a7';
+    ctx.font = '13px sans-serif';
+    ctx.fillText('Waiting for depth...', 12, 24);
+    return;
+  }
+
+  const build = (rows) => {
+    let total = 0;
+    return rows.map((r) => ({ price: r.price, total: total += r.qty }));
+  };
+  const bidCum = build(bids).reverse();
+  const askCum = build(asks);
+  const all = bidCum.concat(askCum);
+  const minPrice = Math.min(...all.map((r) => r.price));
+  const maxPrice = Math.max(...all.map((r) => r.price));
+  const maxTotal = Math.max(...all.map((r) => r.total));
+  const pad = 28;
+  const xFor = (p) => pad + ((p - minPrice) / Math.max(maxPrice - minPrice, 1)) * (rect.width - pad * 2);
+  const yFor = (v) => rect.height - pad - (v / Math.max(maxTotal, 1)) * (rect.height - pad * 2);
+
+  function area(points, fill, stroke) {
+    ctx.beginPath();
+    ctx.moveTo(xFor(points[0].price), rect.height - pad);
+    for (const p of points) ctx.lineTo(xFor(p.price), yFor(p.total));
+    ctx.lineTo(xFor(points[points.length - 1].price), rect.height - pad);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.beginPath();
+    for (const [i, p] of points.entries()) {
+      const x = xFor(p.price), y = yFor(p.total);
+      if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    }
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  area(bidCum, 'rgba(46,204,113,0.18)', '#2ecc71');
+  area(askCum, 'rgba(231,76,60,0.18)', '#e74c3c');
+
+  const midX = xFor(mid);
+  ctx.strokeStyle = '#4da3ff';
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(midX, pad / 2);
+  ctx.lineTo(midX, rect.height - pad / 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#e8edf5';
+  ctx.font = '12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(mid.toFixed(mid >= 100 ? 2 : 5), midX, 18);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#2ecc71';
+  ctx.fillText(`Bid ${bids[0].price}`, 10, rect.height - 10);
+  ctx.fillStyle = '#e74c3c';
+  ctx.textAlign = 'right';
+  ctx.fillText(`Ask ${asks[0].price}`, rect.width - 10, rect.height - 10);
+}
+
+function setDepthVisible(on) {
+  state.depthVisible = on;
+  $('depthPanel').classList.toggle('hidden', !on);
+  $('depthToggle').classList.toggle('active', on);
+  $('depthToggle').textContent = on ? 'Depth' : 'Show Depth';
+  setTimeout(() => {
+    chart.applyOptions({ autoSize: true });
+    drawBubbles();
+    drawDepth();
+  }, 0);
+}
+
+$('depthToggle').addEventListener('click', () => setDepthVisible(!state.depthVisible));
+$('depthHide').addEventListener('click', () => setDepthVisible(false));
+
 // ---------- render loop ----------
 // Candles + trade bubbles repaint every ~16ms (within the 10-20ms window).
 setInterval(() => {
@@ -248,6 +371,10 @@ setInterval(() => {
     if (state.autoCenter) autoCenterNow();
   }
   drawBubbles();
+  if (state.depthDirty) {
+    drawDepth();
+    state.depthDirty = false;
+  }
 }, 16);
 
 // ---------- auto-center (A button) ----------
@@ -341,8 +468,11 @@ $('thresholdInput').addEventListener('input', (e) => {
 // ---------- lifecycle ----------
 async function reload() {
   setStatus('loading\u2026');
+  state.orderBook = { bids: [], asks: [], mid: null };
+  state.depthDirty = true;
   loadBubbles(); // restore persisted bubbles for this symbol
   drawBubbles();
+  drawDepth();
   try {
     await loadHistory();
     connectWs();
@@ -354,7 +484,9 @@ async function reload() {
 
 window.addEventListener('resize', () => {
   drawBubbles();
+  drawDepth();
 });
+chart.timeScale().subscribeVisibleTimeRangeChange(drawBubbles);
 
 loadTopSymbols();
 reload();
