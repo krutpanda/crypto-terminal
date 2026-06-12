@@ -325,15 +325,19 @@ function onDepth(d) {
 
 // ---------- bubble overlay ----------
 function getBubbleGroups() {
-  return state.bubbles
-    .filter((b) => b.usd >= state.domThresholdUsd)
-    .map((b) => ({
-      time: Math.floor(b.tms / 1000),
-      tms: b.tms,
-      side: b.side,
-      usd: b.usd,
-      price: b.price
-    }));
+  const groups = new Map();
+  for (const b of state.bubbles) {
+    if (b.usd < state.domThresholdUsd) continue;
+    const time = bucketTime(b.tms);
+    const key = `${time}.${b.side}`;
+    const g = groups.get(key) || { time, side: b.side, usd: 0, maxUsd: 0, priceUsd: 0, count: 0 };
+    g.usd += b.usd;
+    g.maxUsd = Math.max(g.maxUsd, b.usd);
+    g.priceUsd += b.price * b.usd;
+    g.count += 1;
+    groups.set(key, g);
+  }
+  return [...groups.values()].map((g) => ({ ...g, price: g.priceUsd / Math.max(g.usd, 1) }));
 }
 
 function updateBubbleMarkers() {
@@ -372,24 +376,13 @@ function drawBubbles() {
   const groups = getBubbleGroups();
   bubbleInfoEl.textContent = `Bubbles ${groups.length} / DOM $${fmtUsd(state.domThresholdUsd)}+`;
 
-  const bubbleStacks = {};
-
-for (const g of groups) {
-  if (visible && (g.time < visible.from || g.time > visible.to)) continue;
-
-  const x = ts.timeToCoordinate(g.time);
-
-  const stackKey = `${g.price}_${g.time}`;
-  bubbleStacks[stackKey] = (bubbleStacks[stackKey] || 0) + 1;
-
-  const stackIndex = bubbleStacks[stackKey] - 1;
-
-  let y = candleSeries.priceToCoordinate(g.price);
-
-  // stack bubbles so they don't overlap
-  y -= stackIndex * 18;
-
-  if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+  for (const g of groups) {
+    if (visible && (g.time < visible.from || g.time > visible.to)) continue;
+    const x = ts.timeToCoordinate(g.time);
+    const c = state.candlesByTime.get(g.time);
+    const anchorPrice = c ? (g.side === 'buy' ? c.low : c.high) : g.price;
+    const y = candleSeries.priceToCoordinate(anchorPrice);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
 
     // DeepChart-style soft volume bubble: aggregate all threshold trades per candle/side.
     const strength = Math.max(g.usd, g.maxUsd) / Math.max(state.domThresholdUsd, 1);
