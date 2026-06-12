@@ -11,12 +11,12 @@
   <header id="toolbar">
     <span class="brand">PANDA Charting</span>
 
-    <div class="seg" id="marketToggle">
-      <button data-market="spot" class="active">Spot</button>
-      <button data-market="futures">Futures</button>
-    </div>
+    <span class="futBadge">Futures</span>
 
-    <input id="symbolInput" value="BTCUSDT" spellcheck="false" title="Symbol (press Enter)" />
+    <div class="symBox">
+      <input id="symbolInput" value="BTCUSDT" spellcheck="false" autocomplete="off" title="Symbol (press Enter or pick from list)" />
+      <div id="symbolList" class="symList"></div>
+    </div>
 
     <select id="tfSelect" title="Timeframe">
       <option value="1m">1m</option>
