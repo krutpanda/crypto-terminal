@@ -41,6 +41,12 @@ main { display: flex; height: calc(100% - 49px); min-height: 0; }
 #chartWrap { position: relative; flex: 1; min-width: 0; }
 #chart { position: absolute; inset: 0; }
 #bubbleCanvas { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+.ohlcInfo {
+  position: absolute; top: 8px; left: 10px; z-index: 10; pointer-events: none;
+  padding: 5px 8px; border-radius: 6px; background: rgba(11, 14, 20, 0.78);
+  border: 1px solid rgba(42, 50, 71, 0.9); color: #d6dbe4;
+  font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
 
 #depthPanel {
   width: 320px; min-width: 260px; border-left: 1px solid #1d2433; background: #0d111a;
