@@ -4,8 +4,16 @@
 'use strict';
 
 const ENDPOINTS = {
-  spot:    { rest: 'https://api.binance.com/api/v3/klines',  ws: 'wss://stream.binance.com:9443/stream?streams=' },
-  futures: { rest: 'https://fapi.binance.com/fapi/v1/klines', ws: 'wss://fstream.binance.com/stream?streams=' }
+  spot: {
+    rest: 'https://api.binance.com/api/v3/klines',
+    ticker: 'https://api.binance.com/api/v3/ticker/24hr',
+    ws: 'wss://stream.binance.com:9443/stream?streams='
+  },
+  futures: {
+    rest: 'https://fapi.binance.com/fapi/v1/klines',
+    ticker: 'https://fapi.binance.com/fapi/v1/ticker/24hr',
+    ws: 'wss://fstream.binance.com/stream?streams='
+  }
 };
 
 const TF_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '4h': 14400, '1d': 86400 };
@@ -23,7 +31,8 @@ const state = {
   depth: { bids: [], asks: [] },
   lastCandle: null,
   candleDirty: false,
-  depthDirty: false
+  depthDirty: false,
+  topSymbols: []
 };
 
 // ---------- DOM ----------
@@ -76,6 +85,22 @@ function fmtUsd(v) {
   if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
   if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
   return v.toFixed(0);
+}
+
+// ---------- bubble persistence (survive page refresh) ----------
+function bubbleKey() { return `panda.bubbles.${state.market}.${state.symbol}`; }
+
+function saveBubbles() {
+  try { localStorage.setItem(bubbleKey(), JSON.stringify(state.bubbles.slice(-600))); } catch (_) {}
+}
+
+function loadBubbles() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(bubbleKey())) || [];
+    state.bubbles = saved.filter((b) => b && b.tms && b.usd >= state.thresholdUsd);
+  } catch (_) {
+    state.bubbles = [];
+  }
 }
 
 // ---------- historical klines ----------
@@ -175,12 +200,13 @@ function onAggTrade(t) {
 
   if (usd < state.thresholdUsd) return;
   state.bubbles.push({
-    time: bt,
+    tms: t.T, // raw trade time (ms) so bubbles survive timeframe changes
     price,
     usd,
     side: t.m ? 'sell' : 'buy' // m=true: buyer is maker => aggressive sell
   });
   if (state.bubbles.length > 600) state.bubbles.splice(0, state.bubbles.length - 600);
+  saveBubbles();
 }
 
 function onDepth(d) {
@@ -211,7 +237,7 @@ function drawBubbles() {
 
   const ts = chart.timeScale();
   for (const b of state.bubbles) {
-    const x = ts.timeToCoordinate(b.time);
+    const x = ts.timeToCoordinate(bucketTime(b.tms));
     const y = candleSeries.priceToCoordinate(b.price);
     if (x === null || y === null) continue;
     const r = Math.min(34, 4 + Math.sqrt(b.usd / Math.max(state.thresholdUsd, 1)) * 5);
@@ -324,15 +350,61 @@ document.querySelectorAll('#marketToggle button').forEach((btn) => {
     document.querySelectorAll('#marketToggle button').forEach((b) => b.classList.remove('active'));
     btn.classList.add('active');
     state.market = btn.dataset.market;
+    loadTopSymbols();
     reload();
   });
 });
 
-$('symbolInput').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    state.symbol = e.target.value.trim().toUpperCase();
-    reload();
-  }
+// ---------- symbol search: top 50 USDT pairs by 24h volume ----------
+const symInput = $('symbolInput');
+const symList = $('symbolList');
+
+async function loadTopSymbols() {
+  try {
+    const res = await fetch(ENDPOINTS[state.market].ticker);
+    if (!res.ok) return;
+    const rows = await res.json();
+    state.topSymbols = rows
+      .filter((r) => r.symbol.endsWith('USDT'))
+      .map((r) => ({
+        symbol: r.symbol,
+        vol: parseFloat(r.quoteVolume),
+        chg: parseFloat(r.priceChangePercent)
+      }))
+      .sort((a, b) => b.vol - a.vol)
+      .slice(0, 50);
+  } catch (_) {}
+}
+
+function renderSymbolList(filter) {
+  const q = (filter || '').trim().toUpperCase();
+  const rows = state.topSymbols.filter((s) => !q || s.symbol.includes(q));
+  symList.innerHTML = rows.map((s) => `
+    <div class="symRow" data-sym="${s.symbol}">
+      <span class="symName">${s.symbol}</span>
+      <span class="symVol">$${fmtUsd(s.vol)}</span>
+      <span class="symChg ${s.chg >= 0 ? 'up' : 'down'}">${s.chg >= 0 ? '+' : ''}${s.chg.toFixed(2)}%</span>
+    </div>`).join('');
+  symList.style.display = rows.length ? 'block' : 'none';
+}
+
+function pickSymbol(sym) {
+  if (!sym) return;
+  symInput.value = sym;
+  state.symbol = sym;
+  symList.style.display = 'none';
+  reload();
+}
+
+symInput.addEventListener('focus', () => renderSymbolList(symInput.value));
+symInput.addEventListener('input', () => renderSymbolList(symInput.value));
+symInput.addEventListener('blur', () => setTimeout(() => { symList.style.display = 'none'; }, 150));
+symInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') pickSymbol(e.target.value.trim().toUpperCase());
+});
+symList.addEventListener('mousedown', (e) => {
+  const row = e.target.closest('.symRow');
+  if (row) pickSymbol(row.dataset.sym);
 });
 
 $('tfSelect').addEventListener('change', (e) => {
@@ -343,13 +415,14 @@ $('tfSelect').addEventListener('change', (e) => {
 $('thresholdInput').addEventListener('change', (e) => {
   state.thresholdUsd = Math.max(0, parseFloat(e.target.value) || 0);
   state.bubbles = state.bubbles.filter((b) => b.usd >= state.thresholdUsd);
+  saveBubbles();
   drawBubbles();
 });
 
 // ---------- lifecycle ----------
 async function reload() {
   setStatus('loading\u2026');
-  state.bubbles = [];
+  loadBubbles(); // restore persisted bubbles for this market + symbol
   state.depth = { bids: [], asks: [] };
   drawBubbles();
   drawDepth();
@@ -368,4 +441,5 @@ window.addEventListener('resize', () => {
   drawDepth();
 });
 
+loadTopSymbols();
 reload();

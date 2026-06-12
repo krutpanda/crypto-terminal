@@ -44,3 +44,19 @@ main { display: flex; height: calc(100% - 49px); }
 .depthTitle { font-size: 11px; color: #8b94a7; text-align: center; padding: 4px 0; border-bottom: 1px solid #1d2433; }
 #depthCanvas { flex: 1; width: 100%; }
 
+/* symbol search dropdown */
+.symBox { position: relative; }
+.symList {
+  position: absolute; top: calc(100% + 4px); left: 0; width: 260px;
+  max-height: 320px; overflow-y: auto; display: none; z-index: 50;
+  background: #11151f; border: 1px solid #2a3247; border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.symRow { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+.symRow:hover { background: #1a2233; }
+.symName { flex: 1; font-weight: 600; color: #e8edf5; }
+.symVol { color: #8b94a7; font-variant-numeric: tabular-nums; }
+.symChg { width: 58px; text-align: right; font-variant-numeric: tabular-nums; }
+.symChg.up { color: #2ecc71; }
+.symChg.down { color: #e74c3c; }
+
