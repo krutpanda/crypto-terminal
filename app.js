@@ -22,8 +22,11 @@ const state = {
   depthWs: null,
   wsGen: 0,            // generation counter to ignore stale sockets
   bubbles: [],         // { tms (trade time, ms), price, usd, side }
+  candlesByTime: new Map(),
+  deltasByTime: new Map(),
   lastCandle: null,
   candleDirty: false,
+  markersDirty: false,
   depthDirty: false,
   orderBook: { bids: [], asks: [], mid: null },
   topSymbols: []
@@ -34,6 +37,7 @@ const $ = (id) => document.getElementById(id);
 const statusEl = $('status');
 const deltaInfoEl = $('deltaInfo');
 const depthInfoEl = $('depthInfo');
+const ohlcInfoEl = $('ohlcInfo');
 const bubbleCanvas = $('bubbleCanvas');
 const depthCanvas = $('depthCanvas');
 
@@ -82,6 +86,13 @@ function fmtUsd(v) {
   return v.toFixed(0);
 }
 
+function fmtPrice(v) { return Number.isFinite(v) ? (v >= 100 ? v.toFixed(2) : v.toFixed(5)) : '-'; }
+function timeKey(time) {
+  if (typeof time === 'number') return time;
+  if (time && typeof time === 'object') return Date.UTC(time.year, time.month - 1, time.day) / 1000;
+  return null;
+}
+
 // ---------- bubble persistence (survive page refresh) ----------
 function bubbleKey() { return `panda.bubbles.futures.${state.symbol}`; }
 
@@ -107,13 +118,18 @@ async function loadHistory() {
 
   const candles = [];
   const deltas = [];
+  state.candlesByTime.clear();
+  state.deltasByTime.clear();
   for (const r of rows) {
     const time = Math.floor(r[0] / 1000);
     const vol = parseFloat(r[5]);
     const takerBuy = parseFloat(r[9]);
     const delta = 2 * takerBuy - vol; // buy vol - sell vol
-    candles.push({ time, open: +r[1], high: +r[2], low: +r[3], close: +r[4] });
+    const candle = { time, open: +r[1], high: +r[2], low: +r[3], close: +r[4] };
+    candles.push(candle);
     deltas.push({ time, value: delta, color: deltaColor(delta) });
+    state.candlesByTime.set(time, candle);
+    state.deltasByTime.set(time, delta);
   }
   candleSeries.setData(candles);
   deltaSeries.setData(deltas);
@@ -187,6 +203,7 @@ function updateLiveCandle(price, ms) {
       close: price
     };
   }
+  if (state.lastCandle) state.candlesByTime.set(state.lastCandle.time, state.lastCandle);
   state.candleDirty = true;
 }
 
@@ -201,11 +218,13 @@ function onKline(k) {
     candle.low = Math.min(candle.low, c.low, close);
   }
   state.lastCandle = candle;
+  state.candlesByTime.set(time, candle);
   state.candleDirty = true;
 
   const vol = parseFloat(k.v);
   const takerBuy = parseFloat(k.V);
   const delta = 2 * takerBuy - vol;
+  state.deltasByTime.set(time, delta);
   deltaSeries.update({ time, value: delta, color: deltaColor(delta) });
   deltaInfoEl.textContent = `\u0394 ${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`;
   deltaInfoEl.style.color = delta >= 0 ? '#2ecc71' : '#e74c3c';
@@ -238,6 +257,8 @@ function onAggTrade(t) {
     side: t.m ? 'sell' : 'buy' // m=true: buyer is maker => aggressive sell
   });
   if (state.bubbles.length > 600) state.bubbles.splice(0, state.bubbles.length - 600);
+  state.markersDirty = true;
+  updateBubbleMarkers();
   saveBubbles();
 }
 
@@ -266,6 +287,24 @@ function onDepth(d) {
 }
 
 // ---------- bubble overlay ----------
+function updateBubbleMarkers() {
+  const markersByTime = new Map();
+  for (const b of state.bubbles) {
+    if (b.usd < state.thresholdUsd) continue;
+    const time = bucketTime(b.tms);
+    const old = markersByTime.get(time);
+    if (!old || b.usd > old.usd) markersByTime.set(time, b);
+  }
+  candleSeries.setMarkers([...markersByTime.entries()].sort((a, b) => a[0] - b[0]).map(([time, b]) => ({
+    time,
+    position: b.side === 'buy' ? 'belowBar' : 'aboveBar',
+    color: b.side === 'buy' ? '#2ecc71' : '#e74c3c',
+    shape: 'circle',
+    text: '$' + fmtUsd(b.usd)
+  })));
+  state.markersDirty = false;
+}
+
 function sizeCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
@@ -291,7 +330,11 @@ function drawBubbles() {
     const bubbleTime = bucketTime(b.tms);
     if (visible && (bubbleTime < visible.from || bubbleTime > visible.to)) continue;
     const x = ts.timeToCoordinate(bubbleTime);
-    const y = candleSeries.priceToCoordinate(b.price);
+    let y = candleSeries.priceToCoordinate(b.price);
+    if (!Number.isFinite(y)) {
+      const c = state.candlesByTime.get(bubbleTime);
+      if (c) y = candleSeries.priceToCoordinate(b.side === 'buy' ? c.low : c.high);
+    }
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     // radius scales with trade size: bigger volume => bigger bubble
     const r = Math.min(64, 6 + Math.sqrt(b.usd / Math.max(state.thresholdUsd, 1)) * 9);
@@ -399,6 +442,20 @@ function setDepthVisible(on) {
 $('depthToggle').addEventListener('click', () => setDepthVisible(!state.depthVisible));
 $('depthHide').addEventListener('click', () => setDepthVisible(false));
 
+chart.subscribeCrosshairMove((param) => {
+  const key = timeKey(param.time);
+  const candle = key ? state.candlesByTime.get(key) : state.lastCandle;
+  if (!candle) {
+    ohlcInfoEl.textContent = 'Move crosshair over a candle';
+    return;
+  }
+  const delta = state.deltasByTime.get(candle.time);
+  const change = candle.close - candle.open;
+  const cColor = change >= 0 ? '#2ecc71' : '#e74c3c';
+  const dColor = (delta || 0) >= 0 ? '#2ecc71' : '#e74c3c';
+  ohlcInfoEl.innerHTML = `O <b>${fmtPrice(candle.open)}</b> H <b>${fmtPrice(candle.high)}</b> L <b>${fmtPrice(candle.low)}</b> C <b style="color:${cColor}">${fmtPrice(candle.close)}</b> Δ <b style="color:${dColor}">${Number.isFinite(delta) ? delta.toFixed(2) : '-'}</b>`;
+});
+
 // ---------- render loop ----------
 // Candles + trade bubbles repaint every ~16ms (within the 10-20ms window).
 setInterval(() => {
@@ -499,6 +556,8 @@ $('tfSelect').addEventListener('change', (e) => {
 // threshold applies instantly while typing (no need to press Enter or blur)
 $('thresholdInput').addEventListener('input', (e) => {
   state.thresholdUsd = Math.max(0, parseFloat(e.target.value) || 0);
+  state.markersDirty = true;
+  updateBubbleMarkers();
   drawBubbles();
 });
 
@@ -508,6 +567,8 @@ async function reload() {
   state.orderBook = { bids: [], asks: [], mid: null };
   state.depthDirty = true;
   loadBubbles(); // restore persisted bubbles for this symbol
+  state.markersDirty = true;
+  updateBubbleMarkers();
   drawBubbles();
   drawDepth();
   try {
