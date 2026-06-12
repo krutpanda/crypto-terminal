@@ -1,0 +1,20 @@
+# Deploys the static charting app to GitLab Pages.
+# The app is fully client-side (vanilla JS + Binance public API),
+# so static hosting on Pages is all it needs.
+
+stages:
+  - deploy
+
+pages:
+  stage: deploy
+  image: alpine:latest
+  script:
+    # GitLab Pages serves content from the `public/` directory.
+    - mkdir -p public
+    - cp index.html app.js style.css public/
+  artifacts:
+    paths:
+      - public
+  rules:
+    # Deploy only from the default branch so MRs don't overwrite the live site.
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
