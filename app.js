@@ -384,7 +384,11 @@ function pickSymbol(sym) {
   reload();
 }
 
-symInput.addEventListener('focus', () => renderSymbolList(symInput.value));
+symInput.addEventListener('focus', async () => {
+  symInput.select(); // typing replaces the old symbol
+  if (!state.topSymbols.length) await loadTopSymbols();
+  renderSymbolList(''); // show the full top-50 list by default
+});
 symInput.addEventListener('input', () => renderSymbolList(symInput.value));
 symInput.addEventListener('blur', () => setTimeout(() => { symList.style.display = 'none'; }, 150));
 symInput.addEventListener('keydown', (e) => {
