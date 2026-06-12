@@ -36,6 +36,7 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const statusEl = $('status');
 const deltaInfoEl = $('deltaInfo');
+const bubbleInfoEl = $('bubbleInfo');
 const depthInfoEl = $('depthInfo');
 const ohlcInfoEl = $('ohlcInfo');
 const bubbleCanvas = $('bubbleCanvas');
@@ -97,7 +98,7 @@ function timeKey(time) {
 function bubbleKey() { return `panda.bubbles.futures.${state.symbol}`; }
 
 function saveBubbles() {
-  try { localStorage.setItem(bubbleKey(), JSON.stringify(state.bubbles.slice(-600))); } catch (_) {}
+  try { localStorage.setItem(bubbleKey(), JSON.stringify(state.bubbles.slice(-1800))); } catch (_) {}
 }
 
 function loadBubbles() {
@@ -256,7 +257,7 @@ function onAggTrade(t) {
     usd,
     side: t.m ? 'sell' : 'buy' // m=true: buyer is maker => aggressive sell
   });
-  if (state.bubbles.length > 600) state.bubbles.splice(0, state.bubbles.length - 600);
+  if (state.bubbles.length > 1800) state.bubbles.splice(0, state.bubbles.length - 1800);
   state.markersDirty = true;
   updateBubbleMarkers();
   saveBubbles();
@@ -287,21 +288,32 @@ function onDepth(d) {
 }
 
 // ---------- bubble overlay ----------
-function updateBubbleMarkers() {
-  const markersByTime = new Map();
+function getBubbleGroups() {
+  const groups = new Map();
   for (const b of state.bubbles) {
     if (b.usd < state.thresholdUsd) continue;
     const time = bucketTime(b.tms);
-    const old = markersByTime.get(time);
-    if (!old || b.usd > old.usd) markersByTime.set(time, b);
+    const key = `${time}.${b.side}`;
+    const g = groups.get(key) || { time, side: b.side, usd: 0, maxUsd: 0, priceUsd: 0, count: 0 };
+    g.usd += b.usd;
+    g.maxUsd = Math.max(g.maxUsd, b.usd);
+    g.priceUsd += b.price * b.usd;
+    g.count += 1;
+    groups.set(key, g);
   }
-  candleSeries.setMarkers([...markersByTime.entries()].sort((a, b) => a[0] - b[0]).map(([time, b]) => ({
-    time,
-    position: b.side === 'buy' ? 'belowBar' : 'aboveBar',
-    color: b.side === 'buy' ? '#2ecc71' : '#e74c3c',
+  return [...groups.values()].map((g) => ({ ...g, price: g.priceUsd / Math.max(g.usd, 1) }));
+}
+
+function updateBubbleMarkers() {
+  const groups = getBubbleGroups();
+  candleSeries.setMarkers(groups.sort((a, b) => a.time - b.time).map((g) => ({
+    time: g.time,
+    position: g.side === 'buy' ? 'belowBar' : 'aboveBar',
+    color: g.side === 'buy' ? '#2ecc71' : '#e74c3c',
     shape: 'circle',
-    text: '$' + fmtUsd(b.usd)
+    text: `${g.side === 'buy' ? 'B' : 'S'} $${fmtUsd(g.usd)}`
   })));
+  bubbleInfoEl.textContent = `Bubbles ${groups.length}`;
   state.markersDirty = false;
 }
 
@@ -325,33 +337,43 @@ function drawBubbles() {
 
   const ts = chart.timeScale();
   const visible = ts.getVisibleRange();
-  for (const b of state.bubbles) {
-    if (b.usd < state.thresholdUsd) continue;
-    const bubbleTime = bucketTime(b.tms);
-    if (visible && (bubbleTime < visible.from || bubbleTime > visible.to)) continue;
-    const x = ts.timeToCoordinate(bubbleTime);
-    let y = candleSeries.priceToCoordinate(b.price);
-    if (!Number.isFinite(y)) {
-      const c = state.candlesByTime.get(bubbleTime);
-      if (c) y = candleSeries.priceToCoordinate(b.side === 'buy' ? c.low : c.high);
-    }
+  const groups = getBubbleGroups();
+  bubbleInfoEl.textContent = `Bubbles ${groups.length}`;
+
+  for (const g of groups) {
+    if (visible && (g.time < visible.from || g.time > visible.to)) continue;
+    const x = ts.timeToCoordinate(g.time);
+    const c = state.candlesByTime.get(g.time);
+    const anchorPrice = c ? (g.side === 'buy' ? c.low : c.high) : g.price;
+    const y = candleSeries.priceToCoordinate(anchorPrice);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    // radius scales with trade size: bigger volume => bigger bubble
-    const r = Math.min(64, 6 + Math.sqrt(b.usd / Math.max(state.thresholdUsd, 1)) * 9);
+
+    // DeepChart-style soft volume bubble: aggregate all threshold trades per candle/side.
+    const strength = Math.max(g.usd, g.maxUsd) / Math.max(state.thresholdUsd, 1);
+    const r = Math.min(90, 14 + Math.sqrt(strength) * 18);
+    const color = g.side === 'buy' ? '46,204,113' : '231,76,60';
+
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+    grad.addColorStop(0, `rgba(${color},0.58)`);
+    grad.addColorStop(0.55, `rgba(${color},0.28)`);
+    grad.addColorStop(1, `rgba(${color},0.02)`);
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
-    // green = buy order executed, red = sell executed
-    ctx.fillStyle = b.side === 'buy' ? 'rgba(46,204,113,0.45)' : 'rgba(231,76,60,0.45)';
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(x, y, Math.max(5, r * 0.28), 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${color},0.82)`;
     ctx.fill();
     ctx.lineWidth = 2;
-    ctx.strokeStyle = b.side === 'buy' ? '#2ecc71' : '#e74c3c';
+    ctx.strokeStyle = g.side === 'buy' ? '#2ecc71' : '#e74c3c';
     ctx.stroke();
-    if (r >= 12) {
-      ctx.fillStyle = '#e8edf5';
-      ctx.font = '10px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('$' + fmtUsd(b.usd), x, y + 3);
-    }
+
+    ctx.fillStyle = '#f4f7fb';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${g.side === 'buy' ? 'B' : 'S'} $${fmtUsd(g.usd)}`, x, y + 4);
   }
 }
 
