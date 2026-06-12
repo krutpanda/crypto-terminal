@@ -19,6 +19,7 @@ const state = {
   autoCenter: true,
   depthVisible: true,
   ws: null,
+  depthWs: null,
   wsGen: 0,            // generation counter to ignore stale sockets
   bubbles: [],         // { tms (trade time, ms), price, usd, side }
   lastCandle: null,
@@ -123,10 +124,13 @@ async function loadHistory() {
 // ---------- websocket ----------
 function connectWs() {
   if (state.ws) { try { state.ws.close(); } catch (_) {} }
+  if (state.depthWs) { try { state.depthWs.close(); } catch (_) {} }
   const gen = ++state.wsGen;
   const s = state.symbol.toLowerCase();
-  const streams = [`${s}@kline_${state.tf}`, `${s}@aggTrade`, `${s}@depth20@100ms`].join('/');
-  const ws = new WebSocket(ENDPOINTS.ws + streams);
+
+  // Keep price/trade data on its own socket so a depth issue can never freeze candles.
+  const marketStreams = [`${s}@kline_${state.tf}`, `${s}@aggTrade`, `${s}@bookTicker`].join('/');
+  const ws = new WebSocket(ENDPOINTS.ws + marketStreams);
   state.ws = ws;
 
   ws.onopen = () => { if (gen === state.wsGen) setStatus(`FUTURES ${state.symbol} live`, 'ok'); };
@@ -138,15 +142,35 @@ function connectWs() {
     const stream = msg.stream || '';
     if (stream.includes('@kline') || data.e === 'kline') onKline(data.k);
     else if (stream.includes('@aggTrade') || data.e === 'aggTrade') onAggTrade(data);
-    else if (stream.includes('@depth') || data.e === 'depthUpdate') onDepth(data);
+    else if (stream.includes('@bookTicker') || data.e === 'bookTicker') onBookTicker(data);
   };
 
   ws.onclose = () => {
     if (gen !== state.wsGen) return;
-    setStatus('disconnected - reconnecting\u2026', 'err');
+    setStatus('price disconnected - reconnecting\u2026', 'err');
     setTimeout(() => { if (gen === state.wsGen) connectWs(); }, 2000);
   };
   ws.onerror = () => { try { ws.close(); } catch (_) {} };
+
+  connectDepthWs(gen, s);
+}
+
+function connectDepthWs(gen, s) {
+  // Partial book depth stream for drawing; separate from live candles.
+  const depthWs = new WebSocket(ENDPOINTS.ws + `${s}@depth20@500ms`);
+  state.depthWs = depthWs;
+
+  depthWs.onmessage = (ev) => {
+    if (gen !== state.wsGen) return;
+    const msg = JSON.parse(ev.data);
+    onDepth(msg.data || msg);
+  };
+  depthWs.onclose = () => {
+    if (gen !== state.wsGen) return;
+    state.depthDirty = true;
+    setTimeout(() => { if (gen === state.wsGen) connectDepthWs(gen, s); }, 2000);
+  };
+  depthWs.onerror = () => { try { depthWs.close(); } catch (_) {} };
 }
 
 function updateLiveCandle(price, ms) {
@@ -187,6 +211,16 @@ function onKline(k) {
   deltaInfoEl.style.color = delta >= 0 ? '#2ecc71' : '#e74c3c';
 }
 
+function onBookTicker(t) {
+  const bid = parseFloat(t.b);
+  const ask = parseFloat(t.a);
+  if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) return;
+  const mid = (bid + ask) / 2;
+  state.orderBook.mid = mid;
+  depthInfoEl.textContent = `Price ${mid.toFixed(mid >= 100 ? 2 : 5)}`;
+  updateLiveCandle(mid, Date.now());
+}
+
 function onAggTrade(t) {
   const price = parseFloat(t.p);
   const qty = parseFloat(t.q);
@@ -208,14 +242,16 @@ function onAggTrade(t) {
 }
 
 function onDepth(d) {
-  const bids = (d.b || d.bids || [])
+  const rawBids = d.bids || d.b || [];
+  const rawAsks = d.asks || d.a || [];
+  const bids = rawBids
     .map((r) => ({ price: +r[0], qty: +r[1] }))
-    .filter((r) => r.price > 0 && r.qty > 0)
+    .filter((r) => Number.isFinite(r.price) && Number.isFinite(r.qty) && r.price > 0 && r.qty > 0)
     .sort((a, b) => b.price - a.price)
     .slice(0, 20);
-  const asks = (d.a || d.asks || [])
+  const asks = rawAsks
     .map((r) => ({ price: +r[0], qty: +r[1] }))
-    .filter((r) => r.price > 0 && r.qty > 0)
+    .filter((r) => Number.isFinite(r.price) && Number.isFinite(r.qty) && r.price > 0 && r.qty > 0)
     .sort((a, b) => a.price - b.price)
     .slice(0, 20);
   if (!bids.length || !asks.length) return;
@@ -226,7 +262,7 @@ function onDepth(d) {
   state.orderBook = { bids, asks, mid };
   state.depthDirty = true;
   depthInfoEl.textContent = `Depth ${mid.toFixed(mid >= 100 ? 2 : 5)}`;
-  updateLiveCandle(mid, d.E || Date.now());
+  updateLiveCandle(mid, d.E || d.T || Date.now());
 }
 
 // ---------- bubble overlay ----------
@@ -289,6 +325,7 @@ function drawDepth() {
     ctx.fillStyle = '#8b94a7';
     ctx.font = '13px sans-serif';
     ctx.fillText('Waiting for depth...', 12, 24);
+    ctx.fillText('Live price uses book ticker while depth loads.', 12, 44);
     return;
   }
 
