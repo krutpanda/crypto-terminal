@@ -266,15 +266,13 @@ setInterval(() => {
   drawBubbles();
 }, 16);
 
-// Depth histogram repaints every 20ms.
+// Depth overlay repaints every 20ms (always, so it tracks pan/zoom/scale).
 setInterval(() => {
-  if (state.depthDirty) {
-    drawDepth();
-    state.depthDirty = false;
-  }
+  drawDepth();
+  state.depthDirty = false;
 }, 20);
 
-// ---------- depth chart ----------
+// ---------- depth overlay (on-chart histogram, aligned to price levels) ----------
 function drawDepth() {
   const ctx = sizeCanvas(depthCanvas);
   const rect = depthCanvas.getBoundingClientRect();
@@ -284,42 +282,35 @@ function drawDepth() {
   const { bids, asks } = state.depth;
   if (!bids.length || !asks.length) return;
 
-  // histogram: one horizontal bar per price level, width = level quantity
-  const minP = bids[bids.length - 1][0];
-  const maxP = asks[asks.length - 1][0];
   let maxQty = 0;
   for (const [, q] of bids) maxQty = Math.max(maxQty, q);
   for (const [, q] of asks) maxQty = Math.max(maxQty, q);
 
-  const yOf = (p) => H - ((p - minP) / (maxP - minP || 1)) * H;
-  const xOf = (q) => (q / (maxQty || 1)) * (W - 6);
-  const barH = Math.max(2, Math.floor(H / (bids.length + asks.length)) - 1);
+  // bars hug the right edge of the pane, just left of the price axis
+  let axisW = 0;
+  try { axisW = chart.priceScale('right').width(); } catch (_) {}
+  const xRight = W - axisW;
+  const MAX_W = Math.min(120, xRight * 0.2); // keep the histogram compact
+  const wOf = (q) => (q / (maxQty || 1)) * MAX_W;
 
-  const drawBars = (levels, color) => {
+  // bar height follows the pixel gap between adjacent book levels
+  let barH = 3;
+  const ya = candleSeries.priceToCoordinate(bids[0][0]);
+  const yb = bids.length > 1 ? candleSeries.priceToCoordinate(bids[1][0]) : null;
+  if (ya !== null && yb !== null) barH = Math.min(10, Math.max(2, Math.abs(yb - ya) - 1));
+
+  const drawSide = (levels, color) => {
     ctx.fillStyle = color;
     for (const [p, q] of levels) {
-      const w = xOf(q);
-      if (w <= 0) continue;
-      ctx.fillRect(0, yOf(p) - barH / 2, w, barH);
+      const y = candleSeries.priceToCoordinate(p); // exact chart price level
+      if (y === null || y < 0 || y > H) continue;
+      const w = wOf(q);
+      if (w < 1) continue;
+      ctx.fillRect(xRight - w, y - barH / 2, w, barH);
     }
   };
-  drawBars(bids, 'rgba(46,204,113,0.55)');
-  drawBars(asks, 'rgba(231,76,60,0.55)');
-
-  // mid price line + label
-  const mid = (bids[0][0] + asks[0][0]) / 2;
-  const yMid = yOf(mid);
-  ctx.strokeStyle = '#4da3ff';
-  ctx.setLineDash([4, 3]);
-  ctx.beginPath();
-  ctx.moveTo(0, yMid);
-  ctx.lineTo(W, yMid);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = '#4da3ff';
-  ctx.font = '11px sans-serif';
-  ctx.textAlign = 'right';
-  ctx.fillText(mid.toFixed(2), W - 4, yMid - 4);
+  drawSide(bids, 'rgba(46,204,113,0.40)');
+  drawSide(asks, 'rgba(231,76,60,0.40)');
 }
 
 // ---------- auto-center (A button) ----------

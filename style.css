@@ -39,9 +39,7 @@ main { display: flex; height: calc(100% - 49px); }
 #chart { position: absolute; inset: 0; }
 #bubbleCanvas { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
 
-#depthWrap { width: 180px; border-left: 1px solid #1d2433; background: #0d1119; display: flex; flex-direction: column; }
-.depthTitle { font-size: 11px; color: #8b94a7; text-align: center; padding: 4px 0; border-bottom: 1px solid #1d2433; }
-#depthCanvas { flex: 1; width: 100%; }
+#depthCanvas { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
 
 /* symbol search dropdown */
 .symBox { position: relative; }
