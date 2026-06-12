@@ -1,0 +1,46 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: #0b0e14; color: #d6dbe4; font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
+
+#toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; background: #11151f; border-bottom: 1px solid #1d2433;
+  flex-wrap: wrap;
+}
+.brand { font-weight: 700; color: #4da3ff; margin-right: 6px; }
+
+.seg { display: inline-flex; border: 1px solid #2a3247; border-radius: 6px; overflow: hidden; }
+.seg button {
+  background: transparent; color: #aab3c5; border: 0; padding: 6px 14px; cursor: pointer; font-size: 13px;
+}
+.seg button.active { background: #2057a7; color: #fff; }
+
+#symbolInput {
+  width: 110px; background: #0b0e14; color: #e8edf5; border: 1px solid #2a3247;
+  border-radius: 6px; padding: 6px 8px; text-transform: uppercase; font-size: 13px;
+}
+select, .thr input {
+  background: #0b0e14; color: #e8edf5; border: 1px solid #2a3247; border-radius: 6px; padding: 6px 8px; font-size: 13px;
+}
+.thr { font-size: 12px; color: #aab3c5; display: inline-flex; align-items: center; gap: 4px; }
+.thr input { width: 110px; }
+
+#autoBtn {
+  width: 34px; height: 32px; border-radius: 6px; border: 1px solid #2a3247;
+  background: #0b0e14; color: #aab3c5; font-weight: 700; cursor: pointer;
+}
+#autoBtn.active { background: #2057a7; border-color: #2f6fd0; color: #fff; }
+
+.status { margin-left: auto; font-size: 12px; color: #8b94a7; }
+.status.ok { color: #2ecc71; }
+.status.err { color: #e74c3c; }
+.delta { font-size: 12px; font-variant-numeric: tabular-nums; }
+
+main { display: flex; height: calc(100% - 49px); }
+#chartWrap { position: relative; flex: 1; min-width: 0; }
+#chart { position: absolute; inset: 0; }
+#bubbleCanvas { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+
+#depthWrap { width: 180px; border-left: 1px solid #1d2433; background: #0d1119; display: flex; flex-direction: column; }
+.depthTitle { font-size: 11px; color: #8b94a7; text-align: center; padding: 4px 0; border-bottom: 1px solid #1d2433; }
+#depthCanvas { flex: 1; width: 100%; }
+
