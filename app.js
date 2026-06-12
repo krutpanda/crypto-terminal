@@ -21,7 +21,9 @@ const state = {
   wsGen: 0,            // generation counter to ignore stale sockets
   bubbles: [],         // { time (candle bucket, sec), price, usd, side }
   depth: { bids: [], asks: [] },
-  lastCandle: null
+  lastCandle: null,
+  candleDirty: false,
+  depthDirty: false
 };
 
 // ---------- DOM ----------
@@ -33,6 +35,7 @@ const depthCanvas = $('depthCanvas');
 
 // ---------- chart ----------
 const chart = LightweightCharts.createChart($('chart'), {
+  autoSize: true,
   layout: { background: { color: '#0b0e14' }, textColor: '#aab3c5' },
   grid: { vertLines: { color: '#151b28' }, horzLines: { color: '#151b28' } },
   rightPriceScale: { borderColor: '#1d2433', scaleMargins: { top: 0.08, bottom: 0.22 } },
@@ -131,8 +134,14 @@ function connectWs() {
 function onKline(k) {
   const time = Math.floor(k.t / 1000);
   const candle = { time, open: +k.o, high: +k.h, low: +k.l, close: +k.c };
-  candleSeries.update(candle);
+  // authoritative candle from Binance; the render loop paints it within ~16ms
+  const c = state.lastCandle;
+  if (c && c.time === time) {
+    candle.high = Math.max(candle.high, c.high);
+    candle.low = Math.min(candle.low, c.low);
+  }
   state.lastCandle = candle;
+  state.candleDirty = true;
 
   const vol = parseFloat(k.v);
   const takerBuy = parseFloat(k.V);
@@ -140,24 +149,38 @@ function onKline(k) {
   deltaSeries.update({ time, value: delta, color: deltaColor(delta) });
   deltaInfoEl.textContent = `\u0394 ${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`;
   deltaInfoEl.style.color = delta >= 0 ? '#2ecc71' : '#e74c3c';
-
-  if (state.autoCenter) autoCenterNow();
-  drawBubbles();
 }
 
 function onAggTrade(t) {
   const price = parseFloat(t.p);
   const qty = parseFloat(t.q);
   const usd = price * qty;
+
+  // Build/extend the live candle from every tick so candles move in real
+  // time even between (slow, ~2s) kline pushes.
+  const bt = bucketTime(t.T);
+  const c = state.lastCandle;
+  if (!c || bt > c.time) {
+    state.lastCandle = { time: bt, open: price, high: price, low: price, close: price };
+  } else if (bt === c.time) {
+    state.lastCandle = {
+      time: c.time,
+      open: c.open,
+      high: Math.max(c.high, price),
+      low: Math.min(c.low, price),
+      close: price
+    };
+  }
+  state.candleDirty = true;
+
   if (usd < state.thresholdUsd) return;
   state.bubbles.push({
-    time: bucketTime(t.T),
+    time: bt,
     price,
     usd,
     side: t.m ? 'sell' : 'buy' // m=true: buyer is maker => aggressive sell
   });
   if (state.bubbles.length > 600) state.bubbles.splice(0, state.bubbles.length - 600);
-  drawBubbles();
 }
 
 function onDepth(d) {
@@ -165,7 +188,7 @@ function onDepth(d) {
   const asks = d.asks || d.a || [];
   state.depth.bids = bids.map((x) => [parseFloat(x[0]), parseFloat(x[1])]);
   state.depth.asks = asks.map((x) => [parseFloat(x[0]), parseFloat(x[1])]);
-  drawDepth();
+  state.depthDirty = true;
 }
 
 // ---------- bubble overlay ----------
@@ -208,7 +231,24 @@ function drawBubbles() {
   }
 }
 
-chart.timeScale().subscribeVisibleTimeRangeChange(drawBubbles);
+// ---------- render loops ----------
+// Candles + trade bubbles repaint every ~16ms (within the 10-20ms window).
+setInterval(() => {
+  if (state.candleDirty && state.lastCandle) {
+    candleSeries.update(state.lastCandle);
+    state.candleDirty = false;
+    if (state.autoCenter) autoCenterNow();
+  }
+  drawBubbles();
+}, 16);
+
+// Depth histogram repaints every 20ms.
+setInterval(() => {
+  if (state.depthDirty) {
+    drawDepth();
+    state.depthDirty = false;
+  }
+}, 20);
 
 // ---------- depth chart ----------
 function drawDepth() {
@@ -220,31 +260,27 @@ function drawDepth() {
   const { bids, asks } = state.depth;
   if (!bids.length || !asks.length) return;
 
-  // cumulative volumes
-  let cum = 0;
-  const cumBids = bids.map(([p, q]) => { cum += q; return [p, cum]; });
-  cum = 0;
-  const cumAsks = asks.map(([p, q]) => { cum += q; return [p, cum]; });
-  const maxCum = Math.max(cumBids[cumBids.length - 1][1], cumAsks[cumAsks.length - 1][1]);
+  // histogram: one horizontal bar per price level, width = level quantity
+  const minP = bids[bids.length - 1][0];
+  const maxP = asks[asks.length - 1][0];
+  let maxQty = 0;
+  for (const [, q] of bids) maxQty = Math.max(maxQty, q);
+  for (const [, q] of asks) maxQty = Math.max(maxQty, q);
 
-  const minP = cumBids[cumBids.length - 1][0];
-  const maxP = cumAsks[cumAsks.length - 1][0];
   const yOf = (p) => H - ((p - minP) / (maxP - minP || 1)) * H;
-  const xOf = (v) => (v / (maxCum || 1)) * (W - 6);
+  const xOf = (q) => (q / (maxQty || 1)) * (W - 6);
+  const barH = Math.max(2, Math.floor(H / (bids.length + asks.length)) - 1);
 
-  const fillSide = (levels, color, stroke) => {
-    ctx.beginPath();
-    ctx.moveTo(0, yOf(levels[0][0]));
-    for (const [p, v] of levels) ctx.lineTo(xOf(v), yOf(p));
-    ctx.lineTo(0, yOf(levels[levels.length - 1][0]));
-    ctx.closePath();
+  const drawBars = (levels, color) => {
     ctx.fillStyle = color;
-    ctx.fill();
-    ctx.strokeStyle = stroke;
-    ctx.stroke();
+    for (const [p, q] of levels) {
+      const w = xOf(q);
+      if (w <= 0) continue;
+      ctx.fillRect(0, yOf(p) - barH / 2, w, barH);
+    }
   };
-  fillSide(cumBids, 'rgba(46,204,113,0.22)', '#2ecc71');
-  fillSide(cumAsks, 'rgba(231,76,60,0.22)', '#e74c3c');
+  drawBars(bids, 'rgba(46,204,113,0.55)');
+  drawBars(asks, 'rgba(231,76,60,0.55)');
 
   // mid price line + label
   const mid = (bids[0][0] + asks[0][0]) / 2;
